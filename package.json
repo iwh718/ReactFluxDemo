@@ -1,0 +1,43 @@
+{
+  "name": "fluxdemo",
+  "version": "1.0.0",
+  "description": "myfluxdemo",
+  "main": "index.js",
+  "watch": {
+    "run_babel": {
+      "patterns": [
+        "app"
+      ],
+      "extensions": "js",
+      "quiet": false
+    },
+    "run_browserify": {
+      "patterns": [
+        "app"
+      ],
+      "extensions": "js",
+      "quiet": false
+    }
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "babel": {
+    "presets": [
+      "env",
+      "react"
+    ]
+  },
+  "author": "iwh",
+  "license": "ISC",
+  "devDependencies": {
+    "babel-preset-env": "^1.7.0",
+    "babel-preset-react": "^6.24.1",
+    "react": "^16.8.3",
+    "react-dom": "^16.8.3"
+  },
+  "dependencies": {
+    "events": "^3.0.0",
+    "flux": "^3.1.3"
+  }
+}
