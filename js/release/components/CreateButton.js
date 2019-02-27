@@ -14,6 +14,10 @@ var _TodoActions = require("../actions/TodoActions");
 
 var _TodoActions2 = _interopRequireDefault(_TodoActions);
 
+var _TodoStores = require("../stores/TodoStores");
+
+var _TodoStores2 = _interopRequireDefault(_TodoStores);
+
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
 function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
@@ -34,15 +38,24 @@ var CreateButton = function (_React$Component) {
     _createClass(CreateButton, [{
         key: "__add",
         value: function __add() {
-            _TodoActions2.default.create({ id: 3, content: "第三个！" });
+            _TodoActions2.default.create({ id: _TodoStores2.default.todos.length + 1, content: "\u7B2C" + _TodoStores2.default.todos.length + "\u4E2Atodo\uFF01" });
+            console.log('add!');
         }
     }, {
         key: "render",
         value: function render() {
+            var _this2 = this;
+
             return _react2.default.createElement(
-                "button",
-                { className: "btn btn-primary", onClick: this.__add() },
-                "new"
+                "div",
+                { className: "pull-right" },
+                _react2.default.createElement(
+                    "button",
+                    { className: "btn btn-fab", onClick: function onClick() {
+                            return _this2.__add();
+                        } },
+                    "new"
+                )
             );
         }
     }]);

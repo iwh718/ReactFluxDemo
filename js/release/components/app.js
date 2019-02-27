@@ -14,4 +14,7 @@ var _Todo2 = _interopRequireDefault(_Todo);
 
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
+/**
+ * 这里是入口
+ */
 _reactDom2.default.render(_react2.default.createElement(_Todo2.default, null), document.getElementById('app'));

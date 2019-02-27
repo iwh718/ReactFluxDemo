@@ -27,16 +27,6 @@ var TodoAction = {
             id: id
 
         });
-    },
-    showAlert: function showAlert() {
-        _AppDispatcher2.default.dispatch({
-            actionType: "SHOW_ALERT"
-        });
-    },
-    hideAlert: function hideAlert() {
-        _AppDispatcher2.default.dispatch({
-            actionType: "HIDE_ALERT"
-        });
     }
 };
 exports.default = TodoAction;

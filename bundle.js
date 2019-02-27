@@ -1,4 +1,529 @@
 (function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){var c="function"==typeof require&&require;if(!f&&c)return c(i,!0);if(u)return u(i,!0);var a=new Error("Cannot find module '"+i+"'");throw a.code="MODULE_NOT_FOUND",a}var p=n[i]={exports:{}};e[i][0].call(p.exports,function(r){var n=e[i][1][r];return o(n||r)},p,p.exports,r,e,n,t)}return n[i].exports}for(var u="function"==typeof require&&require,i=0;i<t.length;i++)o(t[i]);return o}return r})()({1:[function(require,module,exports){
+// Copyright Joyent, Inc. and other Node contributors.
+//
+// Permission is hereby granted, free of charge, to any person obtaining a
+// copy of this software and associated documentation files (the
+// "Software"), to deal in the Software without restriction, including
+// without limitation the rights to use, copy, modify, merge, publish,
+// distribute, sublicense, and/or sell copies of the Software, and to permit
+// persons to whom the Software is furnished to do so, subject to the
+// following conditions:
+//
+// The above copyright notice and this permission notice shall be included
+// in all copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+// OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+// MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+// NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+// DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+// OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+// USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+var objectCreate = Object.create || objectCreatePolyfill
+var objectKeys = Object.keys || objectKeysPolyfill
+var bind = Function.prototype.bind || functionBindPolyfill
+
+function EventEmitter() {
+  if (!this._events || !Object.prototype.hasOwnProperty.call(this, '_events')) {
+    this._events = objectCreate(null);
+    this._eventsCount = 0;
+  }
+
+  this._maxListeners = this._maxListeners || undefined;
+}
+module.exports = EventEmitter;
+
+// Backwards-compat with node 0.10.x
+EventEmitter.EventEmitter = EventEmitter;
+
+EventEmitter.prototype._events = undefined;
+EventEmitter.prototype._maxListeners = undefined;
+
+// By default EventEmitters will print a warning if more than 10 listeners are
+// added to it. This is a useful default which helps finding memory leaks.
+var defaultMaxListeners = 10;
+
+var hasDefineProperty;
+try {
+  var o = {};
+  if (Object.defineProperty) Object.defineProperty(o, 'x', { value: 0 });
+  hasDefineProperty = o.x === 0;
+} catch (err) { hasDefineProperty = false }
+if (hasDefineProperty) {
+  Object.defineProperty(EventEmitter, 'defaultMaxListeners', {
+    enumerable: true,
+    get: function() {
+      return defaultMaxListeners;
+    },
+    set: function(arg) {
+      // check whether the input is a positive number (whose value is zero or
+      // greater and not a NaN).
+      if (typeof arg !== 'number' || arg < 0 || arg !== arg)
+        throw new TypeError('"defaultMaxListeners" must be a positive number');
+      defaultMaxListeners = arg;
+    }
+  });
+} else {
+  EventEmitter.defaultMaxListeners = defaultMaxListeners;
+}
+
+// Obviously not all Emitters should be limited to 10. This function allows
+// that to be increased. Set to zero for unlimited.
+EventEmitter.prototype.setMaxListeners = function setMaxListeners(n) {
+  if (typeof n !== 'number' || n < 0 || isNaN(n))
+    throw new TypeError('"n" argument must be a positive number');
+  this._maxListeners = n;
+  return this;
+};
+
+function $getMaxListeners(that) {
+  if (that._maxListeners === undefined)
+    return EventEmitter.defaultMaxListeners;
+  return that._maxListeners;
+}
+
+EventEmitter.prototype.getMaxListeners = function getMaxListeners() {
+  return $getMaxListeners(this);
+};
+
+// These standalone emit* functions are used to optimize calling of event
+// handlers for fast cases because emit() itself often has a variable number of
+// arguments and can be deoptimized because of that. These functions always have
+// the same number of arguments and thus do not get deoptimized, so the code
+// inside them can execute faster.
+function emitNone(handler, isFn, self) {
+  if (isFn)
+    handler.call(self);
+  else {
+    var len = handler.length;
+    var listeners = arrayClone(handler, len);
+    for (var i = 0; i < len; ++i)
+      listeners[i].call(self);
+  }
+}
+function emitOne(handler, isFn, self, arg1) {
+  if (isFn)
+    handler.call(self, arg1);
+  else {
+    var len = handler.length;
+    var listeners = arrayClone(handler, len);
+    for (var i = 0; i < len; ++i)
+      listeners[i].call(self, arg1);
+  }
+}
+function emitTwo(handler, isFn, self, arg1, arg2) {
+  if (isFn)
+    handler.call(self, arg1, arg2);
+  else {
+    var len = handler.length;
+    var listeners = arrayClone(handler, len);
+    for (var i = 0; i < len; ++i)
+      listeners[i].call(self, arg1, arg2);
+  }
+}
+function emitThree(handler, isFn, self, arg1, arg2, arg3) {
+  if (isFn)
+    handler.call(self, arg1, arg2, arg3);
+  else {
+    var len = handler.length;
+    var listeners = arrayClone(handler, len);
+    for (var i = 0; i < len; ++i)
+      listeners[i].call(self, arg1, arg2, arg3);
+  }
+}
+
+function emitMany(handler, isFn, self, args) {
+  if (isFn)
+    handler.apply(self, args);
+  else {
+    var len = handler.length;
+    var listeners = arrayClone(handler, len);
+    for (var i = 0; i < len; ++i)
+      listeners[i].apply(self, args);
+  }
+}
+
+EventEmitter.prototype.emit = function emit(type) {
+  var er, handler, len, args, i, events;
+  var doError = (type === 'error');
+
+  events = this._events;
+  if (events)
+    doError = (doError && events.error == null);
+  else if (!doError)
+    return false;
+
+  // If there is no 'error' event listener then throw.
+  if (doError) {
+    if (arguments.length > 1)
+      er = arguments[1];
+    if (er instanceof Error) {
+      throw er; // Unhandled 'error' event
+    } else {
+      // At least give some kind of context to the user
+      var err = new Error('Unhandled "error" event. (' + er + ')');
+      err.context = er;
+      throw err;
+    }
+    return false;
+  }
+
+  handler = events[type];
+
+  if (!handler)
+    return false;
+
+  var isFn = typeof handler === 'function';
+  len = arguments.length;
+  switch (len) {
+      // fast cases
+    case 1:
+      emitNone(handler, isFn, this);
+      break;
+    case 2:
+      emitOne(handler, isFn, this, arguments[1]);
+      break;
+    case 3:
+      emitTwo(handler, isFn, this, arguments[1], arguments[2]);
+      break;
+    case 4:
+      emitThree(handler, isFn, this, arguments[1], arguments[2], arguments[3]);
+      break;
+      // slower
+    default:
+      args = new Array(len - 1);
+      for (i = 1; i < len; i++)
+        args[i - 1] = arguments[i];
+      emitMany(handler, isFn, this, args);
+  }
+
+  return true;
+};
+
+function _addListener(target, type, listener, prepend) {
+  var m;
+  var events;
+  var existing;
+
+  if (typeof listener !== 'function')
+    throw new TypeError('"listener" argument must be a function');
+
+  events = target._events;
+  if (!events) {
+    events = target._events = objectCreate(null);
+    target._eventsCount = 0;
+  } else {
+    // To avoid recursion in the case that type === "newListener"! Before
+    // adding it to the listeners, first emit "newListener".
+    if (events.newListener) {
+      target.emit('newListener', type,
+          listener.listener ? listener.listener : listener);
+
+      // Re-assign `events` because a newListener handler could have caused the
+      // this._events to be assigned to a new object
+      events = target._events;
+    }
+    existing = events[type];
+  }
+
+  if (!existing) {
+    // Optimize the case of one listener. Don't need the extra array object.
+    existing = events[type] = listener;
+    ++target._eventsCount;
+  } else {
+    if (typeof existing === 'function') {
+      // Adding the second element, need to change to array.
+      existing = events[type] =
+          prepend ? [listener, existing] : [existing, listener];
+    } else {
+      // If we've already got an array, just append.
+      if (prepend) {
+        existing.unshift(listener);
+      } else {
+        existing.push(listener);
+      }
+    }
+
+    // Check for listener leak
+    if (!existing.warned) {
+      m = $getMaxListeners(target);
+      if (m && m > 0 && existing.length > m) {
+        existing.warned = true;
+        var w = new Error('Possible EventEmitter memory leak detected. ' +
+            existing.length + ' "' + String(type) + '" listeners ' +
+            'added. Use emitter.setMaxListeners() to ' +
+            'increase limit.');
+        w.name = 'MaxListenersExceededWarning';
+        w.emitter = target;
+        w.type = type;
+        w.count = existing.length;
+        if (typeof console === 'object' && console.warn) {
+          console.warn('%s: %s', w.name, w.message);
+        }
+      }
+    }
+  }
+
+  return target;
+}
+
+EventEmitter.prototype.addListener = function addListener(type, listener) {
+  return _addListener(this, type, listener, false);
+};
+
+EventEmitter.prototype.on = EventEmitter.prototype.addListener;
+
+EventEmitter.prototype.prependListener =
+    function prependListener(type, listener) {
+      return _addListener(this, type, listener, true);
+    };
+
+function onceWrapper() {
+  if (!this.fired) {
+    this.target.removeListener(this.type, this.wrapFn);
+    this.fired = true;
+    switch (arguments.length) {
+      case 0:
+        return this.listener.call(this.target);
+      case 1:
+        return this.listener.call(this.target, arguments[0]);
+      case 2:
+        return this.listener.call(this.target, arguments[0], arguments[1]);
+      case 3:
+        return this.listener.call(this.target, arguments[0], arguments[1],
+            arguments[2]);
+      default:
+        var args = new Array(arguments.length);
+        for (var i = 0; i < args.length; ++i)
+          args[i] = arguments[i];
+        this.listener.apply(this.target, args);
+    }
+  }
+}
+
+function _onceWrap(target, type, listener) {
+  var state = { fired: false, wrapFn: undefined, target: target, type: type, listener: listener };
+  var wrapped = bind.call(onceWrapper, state);
+  wrapped.listener = listener;
+  state.wrapFn = wrapped;
+  return wrapped;
+}
+
+EventEmitter.prototype.once = function once(type, listener) {
+  if (typeof listener !== 'function')
+    throw new TypeError('"listener" argument must be a function');
+  this.on(type, _onceWrap(this, type, listener));
+  return this;
+};
+
+EventEmitter.prototype.prependOnceListener =
+    function prependOnceListener(type, listener) {
+      if (typeof listener !== 'function')
+        throw new TypeError('"listener" argument must be a function');
+      this.prependListener(type, _onceWrap(this, type, listener));
+      return this;
+    };
+
+// Emits a 'removeListener' event if and only if the listener was removed.
+EventEmitter.prototype.removeListener =
+    function removeListener(type, listener) {
+      var list, events, position, i, originalListener;
+
+      if (typeof listener !== 'function')
+        throw new TypeError('"listener" argument must be a function');
+
+      events = this._events;
+      if (!events)
+        return this;
+
+      list = events[type];
+      if (!list)
+        return this;
+
+      if (list === listener || list.listener === listener) {
+        if (--this._eventsCount === 0)
+          this._events = objectCreate(null);
+        else {
+          delete events[type];
+          if (events.removeListener)
+            this.emit('removeListener', type, list.listener || listener);
+        }
+      } else if (typeof list !== 'function') {
+        position = -1;
+
+        for (i = list.length - 1; i >= 0; i--) {
+          if (list[i] === listener || list[i].listener === listener) {
+            originalListener = list[i].listener;
+            position = i;
+            break;
+          }
+        }
+
+        if (position < 0)
+          return this;
+
+        if (position === 0)
+          list.shift();
+        else
+          spliceOne(list, position);
+
+        if (list.length === 1)
+          events[type] = list[0];
+
+        if (events.removeListener)
+          this.emit('removeListener', type, originalListener || listener);
+      }
+
+      return this;
+    };
+
+EventEmitter.prototype.removeAllListeners =
+    function removeAllListeners(type) {
+      var listeners, events, i;
+
+      events = this._events;
+      if (!events)
+        return this;
+
+      // not listening for removeListener, no need to emit
+      if (!events.removeListener) {
+        if (arguments.length === 0) {
+          this._events = objectCreate(null);
+          this._eventsCount = 0;
+        } else if (events[type]) {
+          if (--this._eventsCount === 0)
+            this._events = objectCreate(null);
+          else
+            delete events[type];
+        }
+        return this;
+      }
+
+      // emit removeListener for all listeners on all events
+      if (arguments.length === 0) {
+        var keys = objectKeys(events);
+        var key;
+        for (i = 0; i < keys.length; ++i) {
+          key = keys[i];
+          if (key === 'removeListener') continue;
+          this.removeAllListeners(key);
+        }
+        this.removeAllListeners('removeListener');
+        this._events = objectCreate(null);
+        this._eventsCount = 0;
+        return this;
+      }
+
+      listeners = events[type];
+
+      if (typeof listeners === 'function') {
+        this.removeListener(type, listeners);
+      } else if (listeners) {
+        // LIFO order
+        for (i = listeners.length - 1; i >= 0; i--) {
+          this.removeListener(type, listeners[i]);
+        }
+      }
+
+      return this;
+    };
+
+function _listeners(target, type, unwrap) {
+  var events = target._events;
+
+  if (!events)
+    return [];
+
+  var evlistener = events[type];
+  if (!evlistener)
+    return [];
+
+  if (typeof evlistener === 'function')
+    return unwrap ? [evlistener.listener || evlistener] : [evlistener];
+
+  return unwrap ? unwrapListeners(evlistener) : arrayClone(evlistener, evlistener.length);
+}
+
+EventEmitter.prototype.listeners = function listeners(type) {
+  return _listeners(this, type, true);
+};
+
+EventEmitter.prototype.rawListeners = function rawListeners(type) {
+  return _listeners(this, type, false);
+};
+
+EventEmitter.listenerCount = function(emitter, type) {
+  if (typeof emitter.listenerCount === 'function') {
+    return emitter.listenerCount(type);
+  } else {
+    return listenerCount.call(emitter, type);
+  }
+};
+
+EventEmitter.prototype.listenerCount = listenerCount;
+function listenerCount(type) {
+  var events = this._events;
+
+  if (events) {
+    var evlistener = events[type];
+
+    if (typeof evlistener === 'function') {
+      return 1;
+    } else if (evlistener) {
+      return evlistener.length;
+    }
+  }
+
+  return 0;
+}
+
+EventEmitter.prototype.eventNames = function eventNames() {
+  return this._eventsCount > 0 ? Reflect.ownKeys(this._events) : [];
+};
+
+// About 1.5x faster than the two-arg version of Array#splice().
+function spliceOne(list, index) {
+  for (var i = index, k = i + 1, n = list.length; k < n; i += 1, k += 1)
+    list[i] = list[k];
+  list.pop();
+}
+
+function arrayClone(arr, n) {
+  var copy = new Array(n);
+  for (var i = 0; i < n; ++i)
+    copy[i] = arr[i];
+  return copy;
+}
+
+function unwrapListeners(arr) {
+  var ret = new Array(arr.length);
+  for (var i = 0; i < ret.length; ++i) {
+    ret[i] = arr[i].listener || arr[i];
+  }
+  return ret;
+}
+
+function objectCreatePolyfill(proto) {
+  var F = function() {};
+  F.prototype = proto;
+  return new F;
+}
+function objectKeysPolyfill(obj) {
+  var keys = [];
+  for (var k in obj) if (Object.prototype.hasOwnProperty.call(obj, k)) {
+    keys.push(k);
+  }
+  return k;
+}
+function functionBindPolyfill(context) {
+  var fn = this;
+  return function () {
+    return fn.apply(context, arguments);
+  };
+}
+
+},{}],2:[function(require,module,exports){
 // shim for using process in browser
 var process = module.exports = {};
 
@@ -184,7 +709,7 @@ process.chdir = function (dir) {
 };
 process.umask = function() { return 0; };
 
-},{}],2:[function(require,module,exports){
+},{}],3:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -214,20 +739,10 @@ var TodoAction = {
             id: id
 
         });
-    },
-    showAlert: function showAlert() {
-        _AppDispatcher2.default.dispatch({
-            actionType: "SHOW_ALERT"
-        });
-    },
-    hideAlert: function hideAlert() {
-        _AppDispatcher2.default.dispatch({
-            actionType: "HIDE_ALERT"
-        });
     }
 };
 exports.default = TodoAction;
-},{"../dispatcher/AppDispatcher":8}],3:[function(require,module,exports){
+},{"../dispatcher/AppDispatcher":9}],4:[function(require,module,exports){
 "use strict";
 
 Object.defineProperty(exports, "__esModule", {
@@ -235,96 +750,18 @@ Object.defineProperty(exports, "__esModule", {
 });
 
 var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
+
+var _react = require("react");
+
+var _react2 = _interopRequireDefault(_react);
+
+var _TodoActions = require("../actions/TodoActions");
+
+var _TodoActions2 = _interopRequireDefault(_TodoActions);
 
 var _TodoStores = require("../stores/TodoStores");
 
 var _TodoStores2 = _interopRequireDefault(_TodoStores);
-
-var _TodoActions = require("../actions/TodoActions");
-
-var _TodoActions2 = _interopRequireDefault(_TodoActions);
-
-var _Todo = require("./Todo");
-
-var _Todo2 = _interopRequireDefault(_Todo);
-
-var _react = require("react");
-
-var _react2 = _interopRequireDefault(_react);
-
-function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
-
-function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
-
-function _possibleConstructorReturn(self, call) { if (!self) { throw new ReferenceError("this hasn't been initialised - super() hasn't been called"); } return call && (typeof call === "object" || typeof call === "function") ? call : self; }
-
-function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; }
-
-var Alert = function (_React$Component) {
-    _inherits(Alert, _React$Component);
-
-    function Alert(props) {
-        _classCallCheck(this, Alert);
-
-        return _possibleConstructorReturn(this, (Alert.__proto__ || Object.getPrototypeOf(Alert)).call(this, props));
-    }
-
-    _createClass(Alert, [{
-        key: "__hide",
-        value: function __hide() {
-            _TodoStores2.default.alertFlag = false;
-        }
-    }, {
-        key: "__add",
-        value: function __add() {
-            _TodoStores2.default.alertFlag = true;
-            var nowNewId = _TodoStores2.default.todos.length;
-            _TodoActions2.default.create({
-                id: nowNewId,
-                content: "\u7B2C" + nowNewId + "\u4E2Atodo"
-            });
-            this.__hide();
-        }
-    }, {
-        key: "render",
-        value: function render() {
-            return _react2.default.createElement(
-                "div",
-                { className: "alert alert-warn" },
-                _react2.default.createElement(
-                    "button",
-                    { className: "btn btn-success", onClick: this.__add() },
-                    "\u786E\u8BA4"
-                ),
-                _react2.default.createElement(
-                    "button",
-                    { className: "btn btn-anger", onClick: this.__hide },
-                    "\u53D6\u6D88"
-                )
-            );
-        }
-    }]);
-
-    return Alert;
-}(_react2.default.Component);
-
-exports.default = Alert;
-},{"../actions/TodoActions":2,"../stores/TodoStores":9,"./Todo":6,"react":21}],4:[function(require,module,exports){
-"use strict";
-
-Object.defineProperty(exports, "__esModule", {
-    value: true
-});
-
-var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
-
-var _react = require("react");
-
-var _react2 = _interopRequireDefault(_react);
-
-var _TodoActions = require("../actions/TodoActions");
-
-var _TodoActions2 = _interopRequireDefault(_TodoActions);
 
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
@@ -346,15 +783,24 @@ var CreateButton = function (_React$Component) {
     _createClass(CreateButton, [{
         key: "__add",
         value: function __add() {
-            _TodoActions2.default.create({ id: 3, content: "第三个！" });
+            _TodoActions2.default.create({ id: _TodoStores2.default.todos.length + 1, content: "\u7B2C" + _TodoStores2.default.todos.length + "\u4E2Atodo\uFF01" });
+            console.log('add!');
         }
     }, {
         key: "render",
         value: function render() {
+            var _this2 = this;
+
             return _react2.default.createElement(
-                "button",
-                { className: "btn btn-primary", onClick: this.__add() },
-                "new"
+                "div",
+                { className: "pull-right" },
+                _react2.default.createElement(
+                    "button",
+                    { className: "btn btn-fab", onClick: function onClick() {
+                            return _this2.__add();
+                        } },
+                    "new"
+                )
             );
         }
     }]);
@@ -363,7 +809,7 @@ var CreateButton = function (_React$Component) {
 }(_react2.default.Component);
 
 exports.default = CreateButton;
-},{"../actions/TodoActions":2,"react":21}],5:[function(require,module,exports){
+},{"../actions/TodoActions":3,"../stores/TodoStores":11,"react":23}],5:[function(require,module,exports){
 "use strict";
 
 Object.defineProperty(exports, "__esModule", {
@@ -400,6 +846,13 @@ var List = function (_React$Component) {
         return _possibleConstructorReturn(this, (List.__proto__ || Object.getPrototypeOf(List)).call(this, props));
     }
 
+    /**
+     * 删除该条todo
+     * @param idx
+     * @private
+     */
+
+
     _createClass(List, [{
         key: "__deleteTodo",
         value: function __deleteTodo(idx) {
@@ -434,7 +887,7 @@ var List = function (_React$Component) {
 }(_react2.default.Component);
 
 exports.default = List;
-},{"../stores/TodoStores":9,"react":21}],6:[function(require,module,exports){
+},{"../stores/TodoStores":11,"react":23}],6:[function(require,module,exports){
 "use strict";
 
 Object.defineProperty(exports, "__esModule", {
@@ -459,13 +912,13 @@ var _List = require("./List");
 
 var _List2 = _interopRequireDefault(_List);
 
+var _Toolbar = require("./Toolbar");
+
+var _Toolbar2 = _interopRequireDefault(_Toolbar);
+
 var _TodoStores = require("../stores/TodoStores");
 
 var _TodoStores2 = _interopRequireDefault(_TodoStores);
-
-var _Alert = require("./Alert");
-
-var _Alert2 = _interopRequireDefault(_Alert);
 
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
@@ -475,9 +928,7 @@ function _classCallCheck(instance, Constructor) { if (!(instance instanceof Cons
 
 function _possibleConstructorReturn(self, call) { if (!self) { throw new ReferenceError("this hasn't been initialised - super() hasn't been called"); } return call && (typeof call === "object" || typeof call === "function") ? call : self; }
 
-function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; } /**
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                * 这里是Todo
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                */
+function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; }
 
 /**
  * Flux架构demo
@@ -490,17 +941,20 @@ var Todo = function (_React$Component) {
     function Todo(props) {
         _classCallCheck(this, Todo);
 
-        //绑定对象
+        //初始化数据从Store获取，Store对于view来说是只读，只能通过action更改，通过store方法获取
         var _this = _possibleConstructorReturn(this, (Todo.__proto__ || Object.getPrototypeOf(Todo)).call(this, props));
 
+        _this.state = {
+            todos: _TodoStores2.default.getAll()
+        };
+        //绑定对象
         _this.__createTodo = _this.__createTodo.bind(_this);
         _this.__deleteTodo = _this.__deleteTodo.bind(_this);
-
+        _this.__onChange = _this.__onChange.bind(_this);
         return _this;
     }
-
     /**
-     * 生成新的清单
+     * 生成新的清单action
      * @private
      */
 
@@ -512,7 +966,20 @@ var Todo = function (_React$Component) {
         }
 
         /**
-         * 删除清单
+         * 接收Store发来的事件，刷新数据
+         * @private
+         */
+
+    }, {
+        key: "__onChange",
+        value: function __onChange() {
+            this.setState({
+                todos: _TodoStores2.default.getAll()
+            });
+        }
+
+        /**
+         * 删除清单action
          * @private
          * @param id
          */
@@ -522,15 +989,35 @@ var Todo = function (_React$Component) {
         value: function __deleteTodo(id) {
             _TodoActions2.default.delete(id);
         }
+
+        /**
+         * 在挂在组件时候，添加Store的事件监听器，并注册回调，这里是onchange
+         */
+
+    }, {
+        key: "componentDidMount",
+        value: function componentDidMount() {
+            _TodoStores2.default.addChangeListener(this.__onChange);
+        }
+
+        /**
+         * 卸载组件时候，取消监听器
+         */
+
+    }, {
+        key: "componentWillUnmount",
+        value: function componentWillUnmount() {
+            _TodoStores2.default.removeChangeListener(this.__onChange);
+        }
     }, {
         key: "render",
         value: function render() {
             return React.createElement(
                 "div",
                 null,
+                React.createElement(_Toolbar2.default, null),
                 React.createElement(_List2.default, null),
-                React.createElement(_CreateButton2.default, null),
-                _TodoStores2.default.alertFlag ? React.createElement(_Alert2.default, null) : ''
+                React.createElement(_CreateButton2.default, null)
             );
         }
     }]);
@@ -539,7 +1026,96 @@ var Todo = function (_React$Component) {
 }(React.Component);
 
 exports.default = Todo;
-},{"../actions/TodoActions":2,"../stores/TodoStores":9,"./Alert":3,"./CreateButton":4,"./List":5,"react":21}],7:[function(require,module,exports){
+},{"../actions/TodoActions":3,"../stores/TodoStores":11,"./CreateButton":4,"./List":5,"./Toolbar":7,"react":23}],7:[function(require,module,exports){
+"use strict";
+
+Object.defineProperty(exports, "__esModule", {
+    value: true
+});
+
+var _createClass = function () { function defineProperties(target, props) { for (var i = 0; i < props.length; i++) { var descriptor = props[i]; descriptor.enumerable = descriptor.enumerable || false; descriptor.configurable = true; if ("value" in descriptor) descriptor.writable = true; Object.defineProperty(target, descriptor.key, descriptor); } } return function (Constructor, protoProps, staticProps) { if (protoProps) defineProperties(Constructor.prototype, protoProps); if (staticProps) defineProperties(Constructor, staticProps); return Constructor; }; }();
+
+var _react = require("react");
+
+var React = _interopRequireWildcard(_react);
+
+var _InitDataStore = require("../stores/InitDataStore");
+
+var _InitDataStore2 = _interopRequireDefault(_InitDataStore);
+
+function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
+
+function _interopRequireWildcard(obj) { if (obj && obj.__esModule) { return obj; } else { var newObj = {}; if (obj != null) { for (var key in obj) { if (Object.prototype.hasOwnProperty.call(obj, key)) newObj[key] = obj[key]; } } newObj.default = obj; return newObj; } }
+
+function _classCallCheck(instance, Constructor) { if (!(instance instanceof Constructor)) { throw new TypeError("Cannot call a class as a function"); } }
+
+function _possibleConstructorReturn(self, call) { if (!self) { throw new ReferenceError("this hasn't been initialised - super() hasn't been called"); } return call && (typeof call === "object" || typeof call === "function") ? call : self; }
+
+function _inherits(subClass, superClass) { if (typeof superClass !== "function" && superClass !== null) { throw new TypeError("Super expression must either be null or a function, not " + typeof superClass); } subClass.prototype = Object.create(superClass && superClass.prototype, { constructor: { value: subClass, enumerable: false, writable: true, configurable: true } }); if (superClass) Object.setPrototypeOf ? Object.setPrototypeOf(subClass, superClass) : subClass.__proto__ = superClass; }
+
+/**
+ * 工具栏
+ */
+var Toolbar = function (_React$Component) {
+    _inherits(Toolbar, _React$Component);
+
+    function Toolbar(props) {
+        _classCallCheck(this, Toolbar);
+
+        return _possibleConstructorReturn(this, (Toolbar.__proto__ || Object.getPrototypeOf(Toolbar)).call(this, props));
+    }
+
+    _createClass(Toolbar, [{
+        key: "render",
+        value: function render() {
+            return React.createElement(
+                "div",
+                { className: "toolbar" },
+                React.createElement(
+                    "div",
+                    { className: "col-xs-12" },
+                    React.createElement(
+                        "h3",
+                        null,
+                        _InitDataStore2.default.getData().title
+                    )
+                ),
+                React.createElement(
+                    "div",
+                    { className: "col-xs-4" },
+                    React.createElement(
+                        "h4",
+                        null,
+                        _InitDataStore2.default.getData().author
+                    )
+                ),
+                React.createElement(
+                    "div",
+                    { className: "col-xs-4" },
+                    React.createElement(
+                        "h4",
+                        null,
+                        _InitDataStore2.default.getData().version
+                    )
+                ),
+                React.createElement(
+                    "div",
+                    { className: "col-xs-4" },
+                    React.createElement(
+                        "h4",
+                        null,
+                        _InitDataStore2.default.getData().time
+                    )
+                )
+            );
+        }
+    }]);
+
+    return Toolbar;
+}(React.Component);
+
+exports.default = Toolbar;
+},{"../stores/InitDataStore":10,"react":23}],8:[function(require,module,exports){
 'use strict';
 
 var _react = require('react');
@@ -556,8 +1132,11 @@ var _Todo2 = _interopRequireDefault(_Todo);
 
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
+/**
+ * 这里是入口
+ */
 _reactDom2.default.render(_react2.default.createElement(_Todo2.default, null), document.getElementById('app'));
-},{"./Todo":6,"react":21,"react-dom":18}],8:[function(require,module,exports){
+},{"./Todo":6,"react":23,"react-dom":20}],9:[function(require,module,exports){
 'use strict';
 
 Object.defineProperty(exports, "__esModule", {
@@ -567,7 +1146,25 @@ Object.defineProperty(exports, "__esModule", {
 var _flux = require('flux');
 
 exports.default = new _flux.Dispatcher();
-},{"flux":11}],9:[function(require,module,exports){
+},{"flux":13}],10:[function(require,module,exports){
+"use strict";
+
+Object.defineProperty(exports, "__esModule", {
+    value: true
+});
+var InitStore = {
+    toolbar: {
+        author: "by:IWH",
+        time: "Time:2019.02.28",
+        title: "Flux Todo Demo",
+        version: "version:v1.0"
+    },
+    getData: function getData() {
+        return this.toolbar;
+    }
+};
+exports.default = InitStore;
+},{}],11:[function(require,module,exports){
 "use strict";
 
 Object.defineProperty(exports, "__esModule", {
@@ -578,31 +1175,28 @@ var _AppDispatcher = require("../dispatcher/AppDispatcher");
 
 var _AppDispatcher2 = _interopRequireDefault(_AppDispatcher);
 
-var _Todo = require("../components/Todo");
+var _events = require("events");
 
-var _Todo2 = _interopRequireDefault(_Todo);
+var _events2 = _interopRequireDefault(_events);
 
 function _interopRequireDefault(obj) { return obj && obj.__esModule ? obj : { default: obj }; }
 
-var TodoStores = {
+/**
+ * Store,存放todo数据
+ * @type {{} & EventEmitter & {todos: *[], getAll(): *, addTodo(*=): void, deleteTodo(*): void, emitChange(): void, addChangeListener(*=): void, removeChangeListener(*=): void}}
+ */
+//添加订阅事件
+var TodoStores = Object.assign({}, _events2.default.prototype, {
     todos: [{
         id: 1,
-        content: "第1个todo"
+        content: "这是一个flux架构的todoDemo。",
+        time: '2019/02/28'
     }, {
         id: 2,
-        content: "第2个todo"
+        content: "最简化使用flux。",
+        time: '2019/02/28'
     }],
-    //弹出提示
-    showAlert: function showAlert() {
-        this.alertFlag = true;
-    },
 
-    //关闭提示
-    hideAlert: function hideAlert() {
-        this.alertFlag = false;
-    },
-
-    alertFlag: false,
     getAll: function getAll() {
         return this.todos;
     },
@@ -613,28 +1207,42 @@ var TodoStores = {
         this.todos = this.todos.filter(function (item) {
             return item.id !== id;
         });
+    },
+
+    //发布change事件
+    emitChange: function emitChange() {
+        this.emit('change');
+    },
+
+    //添加change监听器
+    addChangeListener: function addChangeListener(callback) {
+        this.on('change', callback);
+    },
+
+    //移除change监听器
+    removeChangeListener: function removeChangeListener(callback) {
+        this.removeListener('change', callback);
     }
-};
+});
+//注册分发事件
+//按照分类执行TodoStore事件
 _AppDispatcher2.default.register(function (action) {
     switch (action.actionType) {
         case 'CREATE_TODO':
+            console.log('到store了！');
             TodoStores.addTodo(action.todo);
+            TodoStores.emitChange();
             break;
         case 'DELETE_TODO':
             TodoStores.deleteTodo(action.id);
-            break;
-        case "SHOW_ALERT":
-            TodoStores.showAlert();
-            break;
-        case "HIDE_ALERT":
-            TodoStores.hideAlert();
+            TodoStores.emitChange();
             break;
         default:
             break;
     }
 });
 exports.default = TodoStores;
-},{"../components/Todo":6,"../dispatcher/AppDispatcher":8}],10:[function(require,module,exports){
+},{"../dispatcher/AppDispatcher":9,"events":1}],12:[function(require,module,exports){
 (function (process){
 /**
  * Copyright (c) 2013-present, Facebook, Inc.
@@ -690,7 +1298,7 @@ function invariant(condition, format, a, b, c, d, e, f) {
 
 module.exports = invariant;
 }).call(this,require('_process'))
-},{"_process":1}],11:[function(require,module,exports){
+},{"_process":2}],13:[function(require,module,exports){
 /**
  * Copyright (c) 2014-present, Facebook, Inc.
  * All rights reserved.
@@ -702,7 +1310,7 @@ module.exports = invariant;
 
 module.exports.Dispatcher = require('./lib/Dispatcher');
 
-},{"./lib/Dispatcher":12}],12:[function(require,module,exports){
+},{"./lib/Dispatcher":14}],14:[function(require,module,exports){
 (function (process){
 /**
  * Copyright (c) 2014-present, Facebook, Inc.
@@ -936,7 +1544,7 @@ var Dispatcher = (function () {
 
 module.exports = Dispatcher;
 }).call(this,require('_process'))
-},{"_process":1,"fbjs/lib/invariant":10}],13:[function(require,module,exports){
+},{"_process":2,"fbjs/lib/invariant":12}],15:[function(require,module,exports){
 /*
 object-assign
 (c) Sindre Sorhus
@@ -1028,7 +1636,7 @@ module.exports = shouldUseNative() ? Object.assign : function (target, source) {
 	return to;
 };
 
-},{}],14:[function(require,module,exports){
+},{}],16:[function(require,module,exports){
 (function (process){
 /**
  * Copyright (c) 2013-present, Facebook, Inc.
@@ -1134,7 +1742,7 @@ checkPropTypes.resetWarningCache = function() {
 module.exports = checkPropTypes;
 
 }).call(this,require('_process'))
-},{"./lib/ReactPropTypesSecret":15,"_process":1}],15:[function(require,module,exports){
+},{"./lib/ReactPropTypesSecret":17,"_process":2}],17:[function(require,module,exports){
 /**
  * Copyright (c) 2013-present, Facebook, Inc.
  *
@@ -1148,7 +1756,7 @@ var ReactPropTypesSecret = 'SECRET_DO_NOT_PASS_THIS_OR_YOU_WILL_BE_FIRED';
 
 module.exports = ReactPropTypesSecret;
 
-},{}],16:[function(require,module,exports){
+},{}],18:[function(require,module,exports){
 (function (process){
 /** @license React v16.8.3
  * react-dom.development.js
@@ -22226,7 +22834,7 @@ module.exports = reactDom;
 }
 
 }).call(this,require('_process'))
-},{"_process":1,"object-assign":13,"prop-types/checkPropTypes":14,"react":21,"scheduler":26,"scheduler/tracing":27}],17:[function(require,module,exports){
+},{"_process":2,"object-assign":15,"prop-types/checkPropTypes":16,"react":23,"scheduler":28,"scheduler/tracing":29}],19:[function(require,module,exports){
 /** @license React v16.8.3
  * react-dom.production.min.js
  *
@@ -22497,7 +23105,7 @@ x("38"):void 0;return Si(a,b,c,!1,d)},unmountComponentAtNode:function(a){Qi(a)?v
 X;X=!0;try{ki(a)}finally{(X=b)||W||Yh(1073741823,!1)}},__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED:{Events:[Ia,Ja,Ka,Ba.injectEventPluginsByName,pa,Qa,function(a){ya(a,Pa)},Eb,Fb,Dd,Da]}};function Ui(a,b){Qi(a)?void 0:x("299","unstable_createRoot");return new Pi(a,!0,null!=b&&!0===b.hydrate)}
 (function(a){var b=a.findFiberByHostInstance;return Te(n({},a,{overrideProps:null,currentDispatcherRef:Tb.ReactCurrentDispatcher,findHostInstanceByFiber:function(a){a=hd(a);return null===a?null:a.stateNode},findFiberByHostInstance:function(a){return b?b(a):null}}))})({findFiberByHostInstance:Ha,bundleType:0,version:"16.8.3",rendererPackageName:"react-dom"});var Wi={default:Vi},Xi=Wi&&Vi||Wi;module.exports=Xi.default||Xi;
 
-},{"object-assign":13,"react":21,"scheduler":26}],18:[function(require,module,exports){
+},{"object-assign":15,"react":23,"scheduler":28}],20:[function(require,module,exports){
 (function (process){
 'use strict';
 
@@ -22539,7 +23147,7 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 }).call(this,require('_process'))
-},{"./cjs/react-dom.development.js":16,"./cjs/react-dom.production.min.js":17,"_process":1}],19:[function(require,module,exports){
+},{"./cjs/react-dom.development.js":18,"./cjs/react-dom.production.min.js":19,"_process":2}],21:[function(require,module,exports){
 (function (process){
 /** @license React v16.8.3
  * react.development.js
@@ -24444,7 +25052,7 @@ module.exports = react;
 }
 
 }).call(this,require('_process'))
-},{"_process":1,"object-assign":13,"prop-types/checkPropTypes":14}],20:[function(require,module,exports){
+},{"_process":2,"object-assign":15,"prop-types/checkPropTypes":16}],22:[function(require,module,exports){
 /** @license React v16.8.3
  * react.production.min.js
  *
@@ -24471,7 +25079,7 @@ b,d){return W().useImperativeHandle(a,b,d)},useDebugValue:function(){},useLayout
 b){void 0!==b.ref&&(h=b.ref,f=J.current);void 0!==b.key&&(g=""+b.key);var l=void 0;a.type&&a.type.defaultProps&&(l=a.type.defaultProps);for(c in b)K.call(b,c)&&!L.hasOwnProperty(c)&&(e[c]=void 0===b[c]&&void 0!==l?l[c]:b[c])}c=arguments.length-2;if(1===c)e.children=d;else if(1<c){l=Array(c);for(var m=0;m<c;m++)l[m]=arguments[m+2];e.children=l}return{$$typeof:p,type:a.type,key:g,ref:h,props:e,_owner:f}},createFactory:function(a){var b=M.bind(null,a);b.type=a;return b},isValidElement:N,version:"16.8.3",
 unstable_ConcurrentMode:x,unstable_Profiler:u,__SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED:{ReactCurrentDispatcher:I,ReactCurrentOwner:J,assign:k}},Y={default:X},Z=Y&&X||Y;module.exports=Z.default||Z;
 
-},{"object-assign":13}],21:[function(require,module,exports){
+},{"object-assign":15}],23:[function(require,module,exports){
 (function (process){
 'use strict';
 
@@ -24482,7 +25090,7 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 }).call(this,require('_process'))
-},{"./cjs/react.development.js":19,"./cjs/react.production.min.js":20,"_process":1}],22:[function(require,module,exports){
+},{"./cjs/react.development.js":21,"./cjs/react.production.min.js":22,"_process":2}],24:[function(require,module,exports){
 (function (process){
 /** @license React v0.13.3
  * scheduler-tracing.development.js
@@ -24909,7 +25517,7 @@ exports.unstable_unsubscribe = unstable_unsubscribe;
 }
 
 }).call(this,require('_process'))
-},{"_process":1}],23:[function(require,module,exports){
+},{"_process":2}],25:[function(require,module,exports){
 /** @license React v0.13.3
  * scheduler-tracing.production.min.js
  *
@@ -24921,7 +25529,7 @@ exports.unstable_unsubscribe = unstable_unsubscribe;
 
 'use strict';Object.defineProperty(exports,"__esModule",{value:!0});var b=0;exports.__interactionsRef=null;exports.__subscriberRef=null;exports.unstable_clear=function(a){return a()};exports.unstable_getCurrent=function(){return null};exports.unstable_getThreadID=function(){return++b};exports.unstable_trace=function(a,d,c){return c()};exports.unstable_wrap=function(a){return a};exports.unstable_subscribe=function(){};exports.unstable_unsubscribe=function(){};
 
-},{}],24:[function(require,module,exports){
+},{}],26:[function(require,module,exports){
 (function (process,global){
 /** @license React v0.13.3
  * scheduler.development.js
@@ -25624,7 +26232,7 @@ exports.unstable_getFirstCallbackNode = unstable_getFirstCallbackNode;
 }
 
 }).call(this,require('_process'),typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{"_process":1}],25:[function(require,module,exports){
+},{"_process":2}],27:[function(require,module,exports){
 (function (global){
 /** @license React v0.13.3
  * scheduler.production.min.js
@@ -25649,7 +26257,7 @@ b=c.previous;b.next=c.previous=a;a.next=c;a.previous=b}return a};exports.unstabl
 exports.unstable_shouldYield=function(){return!e&&(null!==d&&d.expirationTime<l||w())};exports.unstable_continueExecution=function(){null!==d&&p()};exports.unstable_pauseExecution=function(){};exports.unstable_getFirstCallbackNode=function(){return d};
 
 }).call(this,typeof global !== "undefined" ? global : typeof self !== "undefined" ? self : typeof window !== "undefined" ? window : {})
-},{}],26:[function(require,module,exports){
+},{}],28:[function(require,module,exports){
 (function (process){
 'use strict';
 
@@ -25660,7 +26268,7 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 }).call(this,require('_process'))
-},{"./cjs/scheduler.development.js":24,"./cjs/scheduler.production.min.js":25,"_process":1}],27:[function(require,module,exports){
+},{"./cjs/scheduler.development.js":26,"./cjs/scheduler.production.min.js":27,"_process":2}],29:[function(require,module,exports){
 (function (process){
 'use strict';
 
@@ -25671,4 +26279,4 @@ if (process.env.NODE_ENV === 'production') {
 }
 
 }).call(this,require('_process'))
-},{"./cjs/scheduler-tracing.development.js":22,"./cjs/scheduler-tracing.production.min.js":23,"_process":1}]},{},[7]);
+},{"./cjs/scheduler-tracing.development.js":24,"./cjs/scheduler-tracing.production.min.js":25,"_process":2}]},{},[8]);

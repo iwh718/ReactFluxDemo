@@ -1,16 +1,25 @@
 import React from "react";
 import TodoAction from "../actions/TodoActions";
-class CreateButton extends React.Component{
-    constructor(props){
+import TodoStores from "../stores/TodoStores";
+
+class CreateButton extends React.Component {
+    constructor(props) {
         super(props)
     }
-    __add(){
-        TodoAction.create({id:3,content:"第三个！"});
+
+    __add() {
+        TodoAction.create({id: TodoStores.todos.length + 1, content: `第${TodoStores.todos.length}个todo！`});
+        console.log('add!');
     }
-    render(){
+
+    render() {
         return (
-            <button className="btn btn-primary" onClick = {this.__add()}>new</button>
+            <div className="pull-right">
+                <button className="btn btn-fab" onClick={() => this.__add()}>new</button>
+            </div>
+
         )
     }
 }
-export default  CreateButton;
+
+export default CreateButton;

@@ -10,6 +10,11 @@ class List extends React.Component{
 
     }
 
+    /**
+     * 删除该条todo
+     * @param idx
+     * @private
+     */
     __deleteTodo(idx){
         console.log(idx);
     }

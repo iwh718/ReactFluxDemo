@@ -34,6 +34,13 @@ var List = function (_React$Component) {
         return _possibleConstructorReturn(this, (List.__proto__ || Object.getPrototypeOf(List)).call(this, props));
     }
 
+    /**
+     * 删除该条todo
+     * @param idx
+     * @private
+     */
+
+
     _createClass(List, [{
         key: "__deleteTodo",
         value: function __deleteTodo(idx) {
